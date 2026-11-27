@@ -8,8 +8,8 @@
 // hash-verified). Everything else is handed back to the native HFS code path,
 // untouched, so same-disk renames stay instantaneous.
 
-exports.version = 1.7
-exports.description = "SafeMove: account-isolated, resumable migration of large files across volumes. Queues large HFS move/copy jobs one at a time with throttling and hash verification, visible only to the owning account; same-disk and small operations stay native."
+exports.version = 2.0
+exports.description = "SafeMove: account-isolated, resumable migration of large files across volumes. Queues large HFS move/copy jobs with configurable parallelism (one at a time by default), throttling and hash verification, visible only to the owning account; same-disk and small operations stay native."
 exports.apiRequired = 13.73
 exports.repo = "hugo529100/hfs-SafeMove"
 exports.frontend_js = ["main.js"]
@@ -36,7 +36,7 @@ exports.config = {
     },
     thresholdMb: {
         type: 'number',
-        defaultValue: 100,
+        defaultValue: 50,
         min: 0,
         max: 1048576,
         label: "Large-file threshold (MB)",
@@ -50,6 +50,14 @@ exports.config = {
         label: "Migration speed limit (MB/s)",
         helperText: "0 = unlimited. Keeps disk load predictable; the live panel shows the actual transfer speed.",
     },
+    parallelJobs: {
+        type: 'number',
+        defaultValue: 1,
+        min: 1,
+        max: 16,
+        label: "Parallel transfers",
+        helperText: "Default 1: one file at a time. Higher values run multiple cross-volume jobs concurrently and increase disk load.",
+    },
     verifyMb: {
         type: 'number',
         defaultValue: 0,
@@ -58,21 +66,11 @@ exports.config = {
         label: "Verification speed limit (MB/s)",
         helperText: "0 = unlimited. Hashing reads both files once; set a limit if the server must stay quiet.",
     },
-    partialMode: {
-        type: 'select',
-        options: {
-            'Visible .part file (incomplete marker)': 'visible',
-            'Hidden temp folder': 'hidden',
-        },
-        defaultValue: 'visible',
-        label: "Incomplete transfers",
-        helperText: "Visible writes <name>.part in the destination folder, so the incomplete state is obvious and resume uses the same file. Hidden keeps partial data in a hidden .hfs-safemove folder.",
-    },
     partialSuffix: {
         type: 'string',
         defaultValue: '.part',
         label: "Incomplete suffix",
-        helperText: "Used in visible mode. The final file is renamed without this suffix only after the hash check passes.",
+        helperText: "The final file is renamed without this suffix only after the hash check passes.",
     },
     hashAlgo: {
         type: 'select',
@@ -115,17 +113,11 @@ exports.config = {
     },
     keepDoneSec: {
         type: 'number',
-        defaultValue: 10,
+        defaultValue: 3,
         min: 3,
         max: 300,
         label: "Keep completed row (seconds)",
         helperText: "How long the integrity result stays visible before the row disappears.",
-    },
-    forceCrossDevice: {
-        type: 'boolean',
-        defaultValue: false,
-        label: "Treat same-disk moves as cross-disk (testing)",
-        helperText: "Only for testing or for deliberately throttled same-disk migrations.",
     },
 
 }
@@ -135,7 +127,6 @@ exports.init = async api => {
     const fs = api.require('fs')
     const path = api.require('path')
     const crypto = api.require('crypto')
-    const { execFile } = api.require('child_process')
     const engine = require('./engine')
 
     const { urlToNode, nodeIsFolder, getVirtualName, statusCodeForMissingPerm, isSameFilePath, hasPermission } = api.require('./vfs')
@@ -161,10 +152,9 @@ exports.init = async api => {
     const jobsFile = path.join(storageDir, 'jobs.json')
 
     const jobs = new Map()
+    const active = new Map()
     let secret = Buffer.alloc(0)
-    let busy = false
     let stopping = false
-    let current = null
     let saveTimer = null
     let saveChain = Promise.resolve()
     let tickTimer = null
@@ -189,9 +179,8 @@ exports.init = async api => {
         return Number.isFinite(value) ? value : fallback
     }
 
-    const thresholdBytes = () => Math.max(0, num('thresholdMb', 100)) * MB
+    const thresholdBytes = () => Math.max(0, num('thresholdMb', 50)) * MB
     const copyRate = () => Math.max(0, num('speedMb', 0)) * MB
-    const visiblePartial = () => api.getConfig('partialMode') !== 'hidden'
     const partialSuffix = () => {
         const raw = String(api.getConfig('partialSuffix') || '.part')
             .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '')
@@ -200,12 +189,14 @@ exports.init = async api => {
         return raw || '.part'
     }
     const verifyRate = () => Math.max(0, num('verifyMb', 0)) * MB
-    const keepDoneMs = () => Math.max(3, num('keepDoneSec', 10)) * 1000
+    const keepDoneMs = () => Math.max(3, num('keepDoneSec', 3)) * 1000
     const algo = () => {
         const value = api.getConfig('hashAlgo')
         return value === 'md5' || value === 'size' ? value : 'sha256'
     }
-    const forceCross = () => api.getConfig('forceCrossDevice') === true
+    // Test-only escape hatch for single-disk development machines. It is not
+    // exposed in plugin settings; production calls only enter for real cross-volume moves.
+    const forceCross = () => process.env.SAFEMOVE_TEST_FORCE_CROSS === '1'
 
     // ------------------------------------------------------------- identity
 
@@ -384,13 +375,19 @@ exports.init = async api => {
     }
 
     async function pump() {
-        if (busy || stopping)
+        if (stopping)
             return
-        const job = nextQueued()
-        if (!job)
-            return
-        busy = true
-        current = job
+        const limit = Math.max(1, Math.min(16, Math.floor(num('parallelJobs', 1))))
+        while (active.size < limit) {
+            const job = nextQueued()
+            if (!job)
+                break
+            active.set(job.id, job)
+            void runJob(job)
+        }
+    }
+
+    async function runJob(job) {
         try {
             await execute(job)
         }
@@ -398,8 +395,7 @@ exports.init = async api => {
             await handleFailure(job, e)
         }
         finally {
-            busy = false
-            current = null
+            active.delete(job.id)
             save()
             kick()
         }
@@ -722,56 +718,14 @@ exports.init = async api => {
 
     // --------------------------------------------------------------- temp
 
-    const tempDirs = new Map()
-    const hiddenDirs = new Set()
-
-    async function tempDirFor(destPath) {
-        const root = path.parse(destPath).root
-        const key = root || path.dirname(destPath)
-        if (tempDirs.has(key))
-            return tempDirs.get(key)
-        const candidates = []
-        if (root)
-            candidates.push(path.join(root, '.hfs-safemove'))
-        candidates.push(path.join(path.dirname(destPath), '.hfs-safemove'))
-        for (const dir of candidates) {
-            try {
-                await fsp.mkdir(dir, { recursive: true })
-                await hideDir(dir)
-                tempDirs.set(key, dir)
-                return dir
-            }
-            catch { /* try next */ }
-        }
-        const fallback = path.dirname(destPath)
-        tempDirs.set(key, fallback)
-        return fallback
-    }
-
-    async function hideDir(dir) {
-        if (process.platform !== 'win32' || hiddenDirs.has(dir))
-            return
-        hiddenDirs.add(dir)
-        await new Promise(resolve => {
-            try { execFile('attrib', ['+h', dir], { windowsHide: true, timeout: 5000 }, () => resolve()) }
-            catch { resolve() }
-        })
-    }
-
     async function tempPathFor(job) {
         if (job.tempPath) {
             await fsp.mkdir(path.dirname(job.tempPath), { recursive: true }).catch(() => {})
             return job.tempPath
         }
-        if (visiblePartial()) {
-            // Deterministic on purpose: after a crash even a rebuilt job can
-            // find <final-name>.part and continue from its size.
-            job.tempPath = path.join(path.dirname(job.destPath), path.basename(job.destPath) + partialSuffix())
-        }
-        else {
-            const dir = await tempDirFor(job.destPath)
-            job.tempPath = path.join(dir, `sm-${job.id}.part`)
-        }
+        // Deterministic on purpose: after a crash even a rebuilt job can find
+        // <final-name>.part in the destination and continue from its size.
+        job.tempPath = path.join(path.dirname(job.destPath), path.basename(job.destPath) + partialSuffix())
         return job.tempPath
     }
 
@@ -1071,8 +1025,9 @@ exports.init = async api => {
             channel: channelFor(username),
             serverNow: Date.now(),
             cfg: {
-                thresholdMb: num('thresholdMb', 100),
+                thresholdMb: num('thresholdMb', 50),
                 speedMb: num('speedMb', 0),
+                parallelJobs: num('parallelJobs', 1),
                 keepDoneSec: Math.round(keepDoneMs() / 1000),
             },
             jobs: mine.slice(0, 100).map(j => publicJob(j, positions.get(j.id))),
@@ -1177,8 +1132,7 @@ exports.init = async api => {
         for (const job of jobs.values())
             if (job.status === 'done' && Date.now() - (job.doneAt || 0) > Math.max(300_000, keepDoneMs() + 60_000))
                 jobs.delete(job.id)
-        if (!busy)
-            void pump()
+        void pump()
     }, 1000)
     tickTimer.unref?.()
 
@@ -1188,17 +1142,17 @@ exports.init = async api => {
         stopping = true
         clearInterval(tickTimer)
         clearTimeout(saveTimer)
-        if (current) {
-            current.abort = true
-            if (current.status === 'running' || current.status === 'verifying') {
-                current.status = 'interrupted'
-                current.phase = 'interrupted'
-                current.speed = 0
+        for (const job of active.values()) {
+            job.abort = true
+            if (job.status === 'running' || job.status === 'verifying') {
+                job.status = 'interrupted'
+                job.phase = 'interrupted'
+                job.speed = 0
             }
         }
-        // Let the copy loop release its file handles before a hot-restarted instance opens them.
+        // Let the copy loops release their file handles before a hot-restarted instance opens them.
         const deadline = Date.now() + 5000
-        while (busy && Date.now() < deadline)
+        while (active.size && Date.now() < deadline)
             await engine.sleep(50)
         await saveNow()
     }
