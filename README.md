@@ -1,3 +1,10 @@
+
+
+
+https://github.com/user-attachments/assets/62c6e9c5-da3b-4659-93c9-d3dcb968cbd5
+
+
+
 # SafeMove
 
 SafeMove is a large-file migration engine for HFS 3. It does not replace HFS; it takes over qualifying moves and copies at the **`move_files` / `copy_files` API layer**:
