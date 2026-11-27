@@ -1,0 +1,32 @@
+{
+    "author": "hugo529100",
+    "version": 1,
+    "hfs_version": "3.4.2",
+    "translate": {
+        "safemove_queued": "排隊中",
+        "safemove_queued_n": "隊列第 {n} 位",
+        "safemove_copying": "複製中",
+        "safemove_verifying": "校驗中",
+        "safemove_conflict": "檔案已存在",
+        "safemove_action_needed": "需要處理",
+        "safemove_failed": "失敗",
+        "safemove_verified": "校驗一致",
+        "safemove_mismatch": "校驗不一致",
+        "safemove_size_ok": "大小一致",
+        "safemove_overwrite": "覆蓋",
+        "safemove_rename": "重新命名",
+        "safemove_skip": "跳過",
+        "safemove_retry": "重試",
+        "safemove_stop": "終止",
+        "safemove_pause": "暫停",
+        "safemove_resume": "繼續",
+        "safemove_abort": "中止",
+        "safemove_delete_partial": "刪除殘缺檔",
+        "safemove_paused": "已暫停",
+        "safemove_interrupted": "已中斷",
+        "safemove_unfinished": "偵測到未完成的傳輸：{file}",
+        "safemove_unfinished_hint": "要繼續，還是刪除殘缺檔？",
+        "safemove_retrying": "{n} 秒後重試",
+        "safemove_action_failed": "操作失敗"
+    }
+}
