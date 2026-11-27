@@ -8,7 +8,7 @@
 // hash-verified). Everything else is handed back to the native HFS code path,
 // untouched, so same-disk renames stay instantaneous.
 
-exports.version = 2.0
+exports.version = 2.1
 exports.description = "SafeMove: account-isolated, resumable migration of large files across volumes. Queues large HFS move/copy jobs with configurable parallelism (one at a time by default), throttling and hash verification, visible only to the owning account; same-disk and small operations stay native."
 exports.apiRequired = 13.73
 exports.repo = "hugo529100/hfs-SafeMove"
