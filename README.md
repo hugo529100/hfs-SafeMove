@@ -6,6 +6,7 @@ https://github.com/user-attachments/assets/cf9a293f-0f34-4237-8bc6-36f72b68b9cf
 
 
 
+<img width="1220" height="2712" alt="Screenshot_2026-11-27-11-38-56-210_com android chrome" src="https://github.com/user-attachments/assets/80bc57a3-3cc8-4ab2-8f90-538f3adf8749" />
 
 
 # SafeMove
